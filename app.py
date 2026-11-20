@@ -51,10 +51,61 @@ def jamendo_lookup(title, artist):
     return results[0].get("audiodownload") if results else None
 
 
+def _norm(s):
+    return "".join(c for c in (s or "").lower() if c.isalnum() or c == " ").strip()
+
+
+def audius_lookup(title, artist):
+    """Full-length stream (and download, if the artist allows it) from Audius."""
+    r = requests.get(
+        "https://api.audius.co/v1/tracks/search",
+        params={"query": f"{title} {artist}", "app_name": "SongFinder", "limit": 5},
+        timeout=10,
+    ).json()
+    for t in r.get("data", []):
+        same_title = _norm(title) in _norm(t.get("title"))
+        same_artist = _norm(artist) in _norm((t.get("user") or {}).get("name")) or \
+                      _norm((t.get("user") or {}).get("name")) in _norm(artist)
+        if same_title and same_artist:
+            tid = t["id"]
+            base = "https://api.audius.co/v1/tracks/" + tid
+            return {
+                "stream_url": f"{base}/stream?app_name=SongFinder",
+                "download_url": f"{base}/download?app_name=SongFinder"
+                                if t.get("is_downloadable") else None,
+                "page_url": "https://audius.co" + t.get("permalink", ""),
+            }
+    return None
+
+
+def archive_lookup(title, artist):
+    """Link to a matching recording on the Internet Archive (public domain / free licences)."""
+    r = requests.get(
+        "https://archive.org/advancedsearch.php",
+        params={
+            "q": f'title:("{title}") AND creator:("{artist}") AND mediatype:audio',
+            "fl[]": "identifier", "rows": 1, "output": "json",
+        },
+        timeout=10,
+    ).json()
+    docs = r.get("response", {}).get("docs", [])
+    return "https://archive.org/details/" + docs[0]["identifier"] if docs else None
+
+
+def safe(fn, *args):
+    """A failing source should never break the whole result."""
+    try:
+        return fn(*args)
+    except Exception:
+        return None
+
+
 def build_result(title, artist, extra=None):
     out = {"title": title, "artist": artist, **(extra or {})}
-    out.update(itunes_lookup(title, artist))
-    out["free_full_download"] = jamendo_lookup(title, artist)
+    out.update(safe(itunes_lookup, title, artist) or {})
+    out["free_full_download"] = safe(jamendo_lookup, title, artist)
+    out["audius"] = safe(audius_lookup, title, artist)
+    out["archive_url"] = safe(archive_lookup, title, artist)
     return out
 
 
@@ -148,8 +199,8 @@ btn.onclick=async()=>{
       const fd=new FormData(); fd.append('audio',new Blob(chunks,{type:rec.mimeType}),rec.mimeType.includes('mp4')?'clip.m4a':'clip.webm');
       show(await (await fetch('/api/identify',{method:'POST',body:fd})).json());
     };
-    rec.start(); btn.classList.add('on'); st.textContent='Listening (8s)...';
-    setTimeout(()=>rec.stop(),8000);
+    rec.start(); btn.classList.add('on'); st.textContent='Listening (15s)...';
+    setTimeout(()=>rec.stop(),15000);
   }catch(e){st.textContent='Microphone access denied.';}
 };
 $('go').onclick=async()=>{
@@ -166,6 +217,12 @@ function show(d){
     (d.preview_url?`<audio controls src="${d.preview_url}"></audio>
       <a class="dl" href="/api/download?url=${encodeURIComponent(d.preview_url)}&name=${nm}">Download 30s preview</a>`:'')+
     (d.free_full_download?`<a class="dl free" href="${d.free_full_download}">Download full song (free, Creative Commons)</a>`:'')+
+    (d.audius?`<p style="margin:12px 0 4px">Full song on Audius</p>
+      <audio controls src="${d.audius.stream_url}"></audio>`+
+      (d.audius.download_url?`<a class="dl free" href="${d.audius.download_url}">Download full song (artist allows it)</a>`:'')+
+      `<a class="dl" href="${d.audius.page_url}" target="_blank">Open on Audius</a>`:'')+
+    (d.archive_url?`<a class="dl free" href="${d.archive_url}" target="_blank">Free recording on Internet Archive</a>`:'')+
+    (!d.audius&&!d.free_full_download&&!d.archive_url?`<p style="opacity:.7;font-size:14px">No free full-length version found. Use the preview or buy link.</p>`:'')+
     (d.buy_url?`<a class="dl" href="${d.buy_url}" target="_blank">Buy / stream on Apple Music</a>`:'')+
     (d.spotify_url?`<a class="dl" href="${d.spotify_url}" target="_blank">Open in Spotify</a>`:'');
   card.style.display='block';
